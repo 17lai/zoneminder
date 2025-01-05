@@ -1,15 +1,19 @@
+"use strict";
 var janus = null;
 const streaming = [];
 
 function MonitorStream(monitorData) {
   this.id = monitorData.id;
   this.connKey = monitorData.connKey;
-  this.auth_relay = auth_relay;
-  this.auth_hash = auth_hash;
   this.url = monitorData.url;
   this.url_to_zms = monitorData.url_to_zms;
   this.width = monitorData.width;
   this.height = monitorData.height;
+  this.RTSP2WebEnabled = monitorData.RTSP2WebEnabled;
+  this.RTSP2WebType = monitorData.RTSP2WebType;
+  this.mseStreamingStarted = false;
+  this.mseQueue = [];
+  this.mseSourceBuffer = null;
   this.janusEnabled = monitorData.janusEnabled;
   this.janusPin = monitorData.janus_pin;
   this.server_id = monitorData.server_id;
@@ -36,6 +40,10 @@ function MonitorStream(monitorData) {
   this.setButton = function(name, element) {
     this.buttons[name] = element;
   };
+  this.gridstack = null;
+  this.setGridStack = function(gs) {
+    this.gridstack = gs;
+  };
 
   this.bottomElement = null;
   this.setBottomElement = function(e) {
@@ -46,13 +54,14 @@ function MonitorStream(monitorData) {
   };
 
   this.img_onerror = function() {
-    console.log('Image stream has been stoppd! stopping streamCmd');
-    this.streamCmdTimer = clearTimeout(this.streamCmdTimer);
+    console.log('Image stream has been stopped! stopping streamCmd');
+    this.streamCmdTimer = clearInterval(this.streamCmdTimer);
   };
   this.img_onload = function() {
     if (!this.streamCmdTimer) {
       console.log('Image stream has loaded! starting streamCmd for '+this.connKey+' in '+statusRefreshTimeout + 'ms');
-      this.streamCmdTimer = setTimeout(this.streamCmdQuery.bind(this), statusRefreshTimeout);
+      this.streamCmdQuery.bind(this);
+      this.streamCmdTimer = setInterval(this.streamCmdQuery.bind(this), statusRefreshTimeout);
     }
   };
 
@@ -78,23 +87,27 @@ function MonitorStream(monitorData) {
   this.show = function() {
     const stream = this.getElement();
     if (!stream.src) {
-      stream.src = this.url_to_zms+"&mode=single&scale="+this.scale+"&connkey="+this.connKey+this.auth_relay;
+      stream.src = this.url_to_zms+"&mode=single&scale="+this.scale+"&connkey="+this.connKey+'&'+auth_relay;
     }
   };
 
   /* scale should be '0' for auto, or an integer value
    * width should be auto, 100%, integer +px
    * height should be auto, 100%, integer +px
+   * param.resizeImg be boolean (added only for using GridStack & PanZoom on Montage page)
+   * param.scaleImg scaling 1=100% (added only for using PanZoom on Montage & Watch page)
+   * param.streamQuality in %, numeric value from -50 to +50)
    * */
-  this.setScale = function(newscale, width, height) {
+  this.setScale = function(newscale, width, height, param = {}) {
     const img = this.getElement();
+    const newscaleSelect = newscale;
     if (!img) {
       console.log('No img in setScale');
       return;
     }
 
     // Scale the frame
-    monitor_frame = $j('#monitor'+this.id);
+    const monitor_frame = $j('#monitor'+this.id);
     if (!monitor_frame) {
       console.log('Error finding frame');
       return;
@@ -102,15 +115,23 @@ function MonitorStream(monitorData) {
 
     if (((newscale == '0') || (newscale == 0) || (newscale=='auto')) && (width=='auto' || !width)) {
       if (!this.bottomElement) {
-        newscale = Math.floor(100*monitor_frame.width() / this.width);
+        if (param.scaleImg) {
+          newscale = Math.floor(100*monitor_frame.width() / this.width * param.scaleImg);
+        } else {
+          newscale = Math.floor(100*monitor_frame.width() / this.width);
+        }
         // We don't want to change the existing css, cuz it might be 59% or 123px or auto;
         width = monitor_frame.css('width');
         height = Math.round(parseInt(this.height) * newscale / 100)+'px';
       } else {
-        const newSize = scaleToFit(this.width, this.height, $j(img), $j(this.bottomElement));
+        const newSize = scaleToFit(this.width, this.height, $j(img), $j(this.bottomElement), $j('#wrapperMonitor'));
         width = newSize.width+'px';
         height = newSize.height+'px';
-        newscale = parseInt(newSize.autoScale);
+        if (param.scaleImg) {
+          newscale = parseInt(newSize.autoScale * param.scaleImg);
+        } else {
+          newscale = parseInt(newSize.autoScale);
+        }
         if (newscale < 25) newscale = 25; // Arbitrary.  4k shown on 1080p screen looks terrible
       }
     } else if (parseInt(width) || parseInt(height)) {
@@ -119,7 +140,9 @@ function MonitorStream(monitorData) {
           newscale = parseInt(100*parseInt(width)/this.width);
         } else { // %
           // Set it, then get the calculated width
-          monitor_frame.css('width', width);
+          if (param.resizeImg) {
+            monitor_frame.css('width', width);
+          }
           newscale = parseInt(100*parseInt(monitor_frame.width())/this.width);
         }
       } else if (height) {
@@ -132,14 +155,36 @@ function MonitorStream(monitorData) {
       height = Math.round(parseInt(this.height) * newscale / 100)+'px';
     }
     if (width && (width != '0px') && (img.style.width.search('%') == -1)) {
-      monitor_frame.css('width', parseInt(width));
+      if (param.resizeImg) {
+        monitor_frame.css('width', parseInt(width));
+      }
     }
-    if (height && height != '0px') img.style.height = height;
-
-    this.setStreamScale(newscale);
+    if (param.resizeImg) {
+      if (img.style.width) img.style.width = '100%';
+      if (height && height != '0px') img.style.height = height;
+    } else { //This code will not be needed when using GridStack & PanZoom on Montage page. Only required when trying to use "scaleControl"
+      if (newscaleSelect != 0) {
+        img.style.width = 'auto';
+        $j(img).closest('.monitorStream')[0].style.overflow = 'auto';
+      } else {
+        //const monitor_stream = $j(img).closest('.monitorStream');
+        //const realWidth = monitor_stream.attr('data-width');
+        //const realHeight = monitor_stream.attr('data-height');
+        //const ratio = realWidth / realHeight;
+        //const imgWidth = $j(img)[0].offsetWidth + 4; // including border
+        img.style.width = '100%';
+        $j(img).closest('.monitorStream')[0].style.overflow = 'hidden';
+      }
+    }
+    let streamQuality = 0;
+    if (param.streamQuality) {
+      streamQuality = param.streamQuality;
+      newscale += parseInt(newscale/100*streamQuality);
+    }
+    this.setStreamScale(newscale, streamQuality);
   }; // setScale
 
-  this.setStreamScale = function(newscale) {
+  this.setStreamScale = function(newscale, streamQuality=0) {
     const img = this.getElement();
     if (!img) {
       console.log("No img in setScale");
@@ -150,7 +195,7 @@ function MonitorStream(monitorData) {
       newscale = parseInt(100*parseInt(stream_frame.width())/this.width);
     }
     if (newscale > 100) newscale = 100; // we never request a larger image, as it just wastes bandwidth
-    if (newscale < 25) newscale = 25; // Arbitrary, lower values look bad
+    if (newscale < 25 && streamQuality > -1) newscale = 25; // Arbitrary, lower values look bad
     if (newscale <= 0) newscale = 100;
     this.scale = newscale;
     if (this.connKey) {
@@ -162,7 +207,8 @@ function MonitorStream(monitorData) {
           console.log('No src on img?!', img);
           return;
         }
-        const newSrc = oldSrc.replace(/scale=\d+/i, 'scale='+newscale);
+        let newSrc = oldSrc.replace(/scale=\d+/i, 'scale='+newscale);
+        newSrc = newSrc.replace(/auth=\w+/i, 'auth='+auth_hash);
         if (newSrc != oldSrc) {
           this.streamCmdTimer = clearTimeout(this.streamCmdTimer);
           // We know that only the first zms will get the command because the
@@ -174,13 +220,13 @@ function MonitorStream(monitorData) {
           console.log("Changing src from " + img.src + " to " + newSrc + 'refresh timeout:' + statusRefreshTimeout);
           img.src = '';
           img.src = newSrc;
-          this.streamCmdTimer = setTimeout(this.streamCmdQuery.bind(this), statusRefreshTimeout);
+          this.streamCmdTimer = setInterval(this.streamCmdQuery.bind(this), statusRefreshTimeout);
         }
       }
     }
   }; // setStreamScale
 
-  this.start = function(delay) {
+  this.start = function() {
     if (this.janusEnabled) {
       let server;
       if (ZM_JANUS_PATH) {
@@ -200,8 +246,59 @@ function MonitorStream(monitorData) {
         }});
       }
       attachVideo(parseInt(this.id), this.janusPin);
-      this.statusCmdTimer = setTimeout(this.statusCmdQuery.bind(this), delay);
+      this.statusCmdTimer = setInterval(this.statusCmdQuery.bind(this), statusRefreshTimeout);
+      this.started = true;
       return;
+    }
+    if (this.RTSP2WebEnabled) {
+      if (ZM_RTSP2WEB_PATH) {
+        const videoEl = document.getElementById("liveStream" + this.id);
+        const url = new URL(ZM_RTSP2WEB_PATH);
+        const useSSL = (url.protocol == 'https');
+
+        const rtsp2webModUrl = url;
+        rtsp2webModUrl.username = '';
+        rtsp2webModUrl.password = '';
+        //.urlParts.length > 1 ? urlParts[1] : urlParts[0]; // drop the username and password for viewing
+        if (this.RTSP2WebType == 'HLS') {
+          const hlsUrl = rtsp2webModUrl;
+          hlsUrl.pathname = "/stream/" + this.id + "/channel/0/hls/live/index.m3u8";
+          /*
+          if (useSSL) {
+            hlsUrl = "https://" + rtsp2webModUrl + "/stream/" + this.id + "/channel/0/hls/live/index.m3u8";
+          } else {
+            hlsUrl = "http://" + rtsp2webModUrl + "/stream/" + this.id + "/channel/0/hls/live/index.m3u8";
+          }
+          */
+          if (Hls.isSupported()) {
+            const hls = new Hls();
+            hls.loadSource(hlsUrl.href);
+            hls.attachMedia(videoEl);
+          } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+            videoEl.src = hlsUrl.href;
+          }
+        } else if (this.RTSP2WebType == 'MSE') {
+          videoEl.addEventListener('pause', () => {
+            if (videoEl.currentTime > videoEl.buffered.end(videoEl.buffered.length - 1)) {
+              videoEl.currentTime = videoEl.buffered.end(videoEl.buffered.length - 1) - 0.1;
+              videoEl.play();
+            }
+          });
+          const mseUrl = rtsp2webModUrl;
+          mseUrl.protocol = useSSL ? 'wss' : 'ws';
+          mseUrl.pathname = "/stream/" + this.id + "/channel/0/mse?uuid=" + this.id + "&channel=0";
+          startMsePlay(this, videoEl, mseUrl.href);
+        } else if (this.RTSP2WebType == 'WebRTC') {
+          const webrtcUrl = rtsp2webModUrl;
+          webrtcUrl.pathname = "/stream/" + this.id + "/channel/0/webrtc";
+          startRTSP2WebPlay(videoEl, webrtcUrl.href);
+        }
+        this.statusCmdTimer = setInterval(this.statusCmdQuery.bind(this), statusRefreshTimeout);
+        this.started = true;
+        return;
+      } else {
+        console.log("ZM_RTSP2WEB_PATH is empty. Go to Options->System and set ZM_RTSP2WEB_PATH accordingly.");
+      }
     }
 
     // zms stream
@@ -218,7 +315,8 @@ function MonitorStream(monitorData) {
     if (stream.getAttribute('loading') == 'lazy') {
       stream.setAttribute('loading', 'eager');
     }
-    src = stream.src.replace(/mode=single/i, 'mode=jpeg');
+    let src = stream.src.replace(/mode=single/i, 'mode=jpeg');
+    src = src.replace(/auth=\w+/i, 'auth='+auth_hash);
     if (-1 == src.search('connkey')) {
       src += '&connkey='+this.connKey;
     }
@@ -229,23 +327,25 @@ function MonitorStream(monitorData) {
     }
     stream.onerror = this.img_onerror.bind(this);
     stream.onload = this.img_onload.bind(this);
+    this.started = true;
   }; // this.start
 
   this.stop = function() {
     if ( 0 ) {
       const stream = this.getElement();
       if (!stream) return;
-      src = stream.src.replace(/mode=jpeg/i, 'mode=single');
+      const src = stream.src.replace(/mode=jpeg/i, 'mode=single');
       if (stream.src != src) {
-        console.log("Setting to stopped");
         stream.src = '';
         stream.src = src;
       }
     }
     this.streamCommand(CMD_STOP);
-    this.statusCmdTimer = clearTimeout(this.statusCmdTimer);
-    this.streamCmdTimer = clearTimeout(this.streamCmdTimer);
+    this.statusCmdTimer = clearInterval(this.statusCmdTimer);
+    this.streamCmdTimer = clearInterval(this.streamCmdTimer);
+    this.started = false;
   };
+
   this.kill = function() {
     if (janus) {
       if (streaming[this.id]) {
@@ -253,24 +353,47 @@ function MonitorStream(monitorData) {
       }
     }
     const stream = this.getElement();
-    if (!stream) return;
+    if (!stream) {
+      console.log("No element found for monitor "+this.id);
+      return;
+    }
     stream.onerror = null;
     stream.onload = null;
     this.stop();
 
-    if (this.ajaxQueue) {
+    // this.stop tells zms to stop streaming, but the process remains. We need to turn the stream into an image.
+    if (stream.src) {
+      const src = stream.src.replace(/mode=jpeg/i, 'mode=single');
+      if (stream.src != src) {
+        stream.src = '';
+        stream.src = src;
+      }
+    }
+
+    // Because we stopped the zms process above, any remaining ajaxes will fail.  But aborting them will also cause them to fail, so why bother?
+    if (0 && this.ajaxQueue) {
       console.log("Aborting in progress ajax for kill");
       // Doing this for responsiveness, but we could be aborting something important. Need smarter logic
       this.ajaxQueue.abort();
     }
-    this.statusCmdTimer = clearTimeout(this.statusCmdTimer);
-    this.streamCmdTimer = clearTimeout(this.streamCmdTimer);
   };
+
   this.pause = function() {
-    this.streamCommand(CMD_PAUSE);
+    if (this.element.src) {
+      this.streamCommand(CMD_PAUSE);
+    } else {
+      this.element.pause();
+      this.statusCmdTimer = clearInterval(this.statusCmdTimer);
+    }
   };
+
   this.play = function() {
-    this.streamCommand(CMD_PLAY);
+    if (this.element.src) {
+      this.streamCommand(CMD_PLAY);
+    } else {
+      this.element.play();
+      this.statusCmdTimer = setInterval(this.statusCmdQuery.bind(this), statusRefreshTimeout);
+    }
   };
 
   this.eventHandler = function(event) {
@@ -281,6 +404,10 @@ function MonitorStream(monitorData) {
     console.log('onclick');
   };
 
+  this.onmove = function(evt) {
+    console.log('onmove');
+  };
+
   this.setup_onclick = function(func) {
     if (func) {
       this.onclick = func;
@@ -289,6 +416,17 @@ function MonitorStream(monitorData) {
       const el = this.getFrame();
       if (!el) return;
       el.addEventListener('click', this.onclick, false);
+    }
+  };
+
+  this.setup_onmove = function(func) {
+    if (func) {
+      this.onmove = func;
+    }
+    if (this.onmove) {
+      const el = this.getFrame();
+      if (!el) return;
+      el.addEventListener('mousemove', this.onmove, false);
     }
   };
 
@@ -385,8 +523,6 @@ function MonitorStream(monitorData) {
     } else if (error == 'Unauthorized') {
       window.location.reload();
     } else {
-      console.log("Queuing up a new query after a pause");
-      this.streamCmdTimer = setTimeout(this.streamCmdQuery.bind(this), 10*statusRefreshTimeout);
       logAjaxFail(jqxhr, textStatus, error);
     }
   };
@@ -407,7 +543,7 @@ function MonitorStream(monitorData) {
           const captureFPSValue = $j('#captureFPSValue'+this.id);
           const analysisFPSValue = $j('#analysisFPSValue'+this.id);
 
-          this.status.fps = this.status.fps.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1});
+          this.status.fps = this.status.fps.toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2});
           if (viewingFPSValue.length && (viewingFPSValue.text != this.status.fps)) {
             viewingFPSValue.text(this.status.fps);
           }
@@ -423,7 +559,7 @@ function MonitorStream(monitorData) {
           const levelValue = $j('#levelValue');
           if (levelValue.length) {
             levelValue.text(this.status.level);
-            var newClass = 'ok';
+            let newClass = 'ok';
             if (this.status.level > 95) {
               newClass = 'alarm';
             } else if (this.status.level > 80) {
@@ -431,6 +567,9 @@ function MonitorStream(monitorData) {
             }
             levelValue.removeClass();
             levelValue.addClass(newClass);
+          }
+
+          if (this.status.score) {
           }
 
           const delayString = secsToTime(this.status.delay);
@@ -494,46 +633,46 @@ function MonitorStream(monitorData) {
         this.setAlarmState(this.status.state);
 
         if (canEdit.Monitors) {
-          if (streamStatus.enabled) {
-            if ('enableAlarmButton' in this.buttons) {
+          if ('enableAlarmButton' in this.buttons) {
+            if (streamStatus.analysing == ANALYSING_NONE) {
+              // Not doing analysis, so enable/disable button should be grey
+
               if (!this.buttons.enableAlarmButton.hasClass('disabled')) {
                 this.buttons.enableAlarmButton.addClass('disabled');
                 this.buttons.enableAlarmButton.prop('title', disableAlarmsStr);
               }
-            }
-            if ('forceAlarmButton' in this.buttons) {
-              if (streamStatus.forced) {
-                if (! this.buttons.forceAlarmButton.hasClass('disabled')) {
-                  this.buttons.forceAlarmButton.addClass('disabled');
-                  this.buttons.forceAlarmButton.prop('title', cancelForcedAlarmStr);
-                }
-              } else {
-                if (this.buttons.forceAlarmButton.hasClass('disabled')) {
-                  this.buttons.forceAlarmButton.removeClass('disabled');
-                  this.buttons.forceAlarmButton.prop('title', forceAlarmStr);
-                }
-              }
-              this.buttons.forceAlarmButton.prop('disabled', false);
-            }
-          } else {
-            if ('enableAlarmButton' in this.buttons) {
+            } else {
               this.buttons.enableAlarmButton.removeClass('disabled');
               this.buttons.enableAlarmButton.prop('title', enableAlarmsStr);
-            }
-            if ('forceAlarmButton' in this.buttons) {
-              this.buttons.forceAlarmButton.prop('disabled', true);
-            }
-          }
-          if ('enableAlarmButton' in this.buttons) {
+            } // end if doing analysis
             this.buttons.enableAlarmButton.prop('disabled', false);
+          } // end if have enableAlarmButton
+
+          if ('forceAlarmButton' in this.buttons) {
+            if (streamStatus.state == STATE_ALARM || streamStatus.state == STATE_ALERT) {
+              // Ic0n: My thought here is that the non-disabled state should be for killing an alarm
+              // and the disabled state should be to force an alarm
+              if (this.buttons.forceAlarmButton.hasClass('disabled')) {
+                this.buttons.forceAlarmButton.removeClass('disabled');
+                this.buttons.forceAlarmButton.prop('title', cancelForcedAlarmStr);
+              }
+            } else {
+              if (!this.buttons.forceAlarmButton.hasClass('disabled')) {
+                // Looks disabled
+                this.buttons.forceAlarmButton.addClass('disabled');
+                this.buttons.forceAlarmButton.prop('title', forceAlarmStr);
+              }
+            }
+            this.buttons.forceAlarmButton.prop('disabled', false);
           }
         } // end if canEdit.Monitors
 
         if (this.status.auth) {
-          if (this.status.auth != this.auth_hash) {
+          if (this.status.auth != auth_hash) {
             // Don't reload the stream because it causes annoying flickering. Wait until the stream breaks.
-            console.log("Changed auth from " + this.auth_hash + " to " + this.status.auth);
-            this.streamCmdParms.auth = auth_hash = this.auth_hash = this.status.auth;
+            console.log("Changed auth from " + auth_hash + " to " + this.status.auth);
+            auth_hash = this.status.auth;
+            auth_relay = this.status.auth_relay;
           }
         } // end if have a new auth hash
       } // end if has state
@@ -542,8 +681,8 @@ function MonitorStream(monitorData) {
       // Try to reload the image stream.
       if (stream.src) {
         console.log('Reloading stream: ' + stream.src);
-        src = stream.src.replace(/rand=\d+/i, 'rand='+Math.floor((Math.random() * 1000000) ));
-        src = src.replace(/auth=\w+/i, 'auth='+this.auth_hash);
+        let src = stream.src.replace(/rand=\d+/i, 'rand='+Math.floor((Math.random() * 1000000) ));
+        src = src.replace(/auth=\w+/i, 'auth='+auth_hash);
         // Maybe updated auth
         if (src != stream.src) {
           stream.src = '';
@@ -558,20 +697,18 @@ function MonitorStream(monitorData) {
   /* getStatusCmd is used when not streaming, since there is no persistent zms */
   this.getStatusCmdResponse=function(respObj, respText) {
     //watchdogOk('status');
-    this.statusCmdTimer = clearTimeout(this.statusCmdTimer);
-
-
     if (respObj.result == 'Ok') {
-      const monitorStatus = respObj.monitor.Status;
       const captureFPSValue = $j('#captureFPSValue'+this.id);
       const analysisFPSValue = $j('#analysisFPSValue'+this.id);
+      const viewingFPSValue = $j('#viewingFPSValue'+this.id);
+      const monitor = respObj.monitor;
 
-      if (respObj.monitor.FrameRate) {
-        const fpses = respObj.monitor.FrameRate.split(",");
+      if (monitor.FrameRate) {
+        const fpses = monitor.FrameRate.split(',');
         fpses.forEach(function(fps) {
           const name_values = fps.split(':');
           const name = name_values[0].trim();
-          const value = name_values[1].trim().toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 1});
+          const value = name_values[1].trim().toLocaleString(undefined, {minimumFractionDigits: 1, maximumFractionDigits: 2});
 
           if (name == 'analysis') {
             this.status.analysisfps = value;
@@ -586,63 +723,79 @@ function MonitorStream(monitorData) {
             console.log("Unknown fps name " + name);
           }
         });
+      } else {
+        if (analysisFPSValue.length && (analysisFPSValue.text() != monitor.AnalysisFPS)) {
+          analysisFPSValue.text(monitor.AnalysisFPS);
+        }
+
+        if (captureFPSValue.length && (captureFPSValue.text() != monitor.CaptureFPS)) {
+          captureFPSValue.text(monitor.CaptureFPS);
+        }
+        if (viewingFPSValue.length && viewingFPSValue.text() == '') {
+          $j('#viewingFPS'+this.id).hide();
+        }
       }
 
       if (canEdit.Monitors) {
-        if (monitorStatus.enabled) {
-          if ('enableAlarmButton' in this.buttons) {
+        if ('enableAlarmButton' in this.buttons) {
+          if (monitor.Analysing == 'None') {
+            // Not doing analysis, so enable/disable button should be grey
+
             if (!this.buttons.enableAlarmButton.hasClass('disabled')) {
               this.buttons.enableAlarmButton.addClass('disabled');
               this.buttons.enableAlarmButton.prop('title', disableAlarmsStr);
             }
-          }
-          if ('forceAlarmButton' in this.buttons) {
-            if (monitorStatus.forced) {
-              if (!this.buttons.forceAlarmButton.hasClass('disabled')) {
-                this.buttons.forceAlarmButton.addClass('disabled');
-                this.buttons.forceAlarmButton.prop('title', cancelForcedAlarmStr);
-              }
-            } else {
-              if (this.buttons.forceAlarmButton.hasClass('disabled')) {
-                this.buttons.forceAlarmButton.removeClass('disabled');
-                this.buttons.forceAlarmButton.prop('title', forceAlarmStr);
-              }
-            }
-            this.buttons.forceAlarmButton.prop('disabled', false);
-          }
-        } else {
-          if ('enableAlarmButton' in this.buttons) {
+          } else {
             this.buttons.enableAlarmButton.removeClass('disabled');
             this.buttons.enableAlarmButton.prop('title', enableAlarmsStr);
-          }
-          if ('forceAlarmButton' in this.buttons) {
-            this.buttons.forceAlarmButton.prop('disabled', true);
-          }
-        }
-        if ('enableAlarmButton' in this.buttons) {
+          } // end if doing analysis
           this.buttons.enableAlarmButton.prop('disabled', false);
+        } // end if have enableAlarmButton
+
+        if ('forceAlarmButton' in this.buttons) {
+          if (monitor.Status == STATE_ALARM || monitor.Status == STATE_ALERT) {
+            // Ic0n: My thought here is that the non-disabled state should be for killing an alarm
+            // and the disabled state should be to force an alarm
+            if (this.buttons.forceAlarmButton.hasClass('disabled')) {
+              this.buttons.forceAlarmButton.removeClass('disabled');
+              this.buttons.forceAlarmButton.prop('title', cancelForcedAlarmStr);
+            }
+          } else {
+            if (!this.buttons.forceAlarmButton.hasClass('disabled')) {
+              // Looks disabled
+              this.buttons.forceAlarmButton.addClass('disabled');
+              this.buttons.forceAlarmButton.prop('title', forceAlarmStr);
+            }
+          }
+          this.buttons.forceAlarmButton.prop('disabled', false);
         }
+      } else {
+        console.log("Can't edit");
       } // end if canEdit.Monitors
 
-      this.setAlarmState(monitorStatus);
+      this.setAlarmState(monitor.Status);
+
+      if (respObj.auth_hash) {
+        if (auth_hash != respObj.auth_hash) {
+          // Don't reload the stream because it causes annoying flickering. Wait until the stream breaks.
+          console.log("Changed auth from " + auth_hash + " to " + respObj.auth_hash);
+          auth_hash = respObj.auth_hash;
+          auth_relay = respObj.auth_relay;
+        }
+      } // end if have a new auth hash
     } else {
       checkStreamForErrors('getStatusCmdResponse', respObj);
     }
+  }; // this.getStatusCmdResponse
 
-    this.statusCmdTimer = setTimeout(this.statusCmdQuery.bind(this), statusRefreshTimeout);
-  };
-
-  this.statusCmdQuery=function() {
-    $j.getJSON(this.url + '?view=request&request=status&entity=monitor&element[]=Status&element[]=FrameRate&id='+this.id+'&'+this.auth_relay)
+  this.statusCmdQuery = function() {
+    $j.getJSON(this.url + '?view=request&request=status&entity=monitor&element[]=Status&element[]=CaptureFPS&element[]=AnalysisFPS&element[]=Analysing&element[]=Recording&id='+this.id+'&'+auth_relay)
         .done(this.getStatusCmdResponse.bind(this))
         .fail(logAjaxFail);
-
-    this.statusCmdTimer = null;
   };
 
   this.statusQuery = function() {
     this.streamCommand(CMD_QUERY);
-    this.statusCmdTimer = setTimeout(this.statusQuery.bind(this), statusRefreshTimeout);
   };
 
   this.streamCmdQuery = function(resent) {
@@ -653,8 +806,6 @@ function MonitorStream(monitorData) {
       this.streamCmdParms.command = CMD_QUERY;
       this.streamCmdReq(this.streamCmdParms);
     }
-    // Queue up another query
-    this.streamCmdTimer = setTimeout(this.streamCmdQuery.bind(this), statusRefreshTimeout);
   };
 
   this.streamCommand = function(command) {
@@ -664,15 +815,17 @@ function MonitorStream(monitorData) {
     } else {
       params.command = command;
     }
+    /*
     if (this.ajaxQueue) {
       this.ajaxQueue.abort();
     }
+    */
     this.streamCmdReq(params);
   };
 
   this.alarmCommand = function(command) {
     if (this.ajaxQueue) {
-      console.log("Aborting in progress ajax for alarm");
+      console.log('Aborting in progress ajax for alarm', this.ajaxQueue);
       // Doing this for responsiveness, but we could be aborting something important. Need smarter logic
       this.ajaxQueue.abort();
     }
@@ -685,7 +838,7 @@ function MonitorStream(monitorData) {
       url: this.url + (auth_relay?'?'+auth_relay:''),
       xhrFields: {withCredentials: true},
       data: alarmCmdParms,
-      dataType: "json"
+      dataType: 'json'
     })
         .done(this.getStreamCmdResponse.bind(this))
         .fail(this.onFailure.bind(this));
@@ -699,7 +852,7 @@ function MonitorStream(monitorData) {
         url: this.url + (auth_relay?'?'+auth_relay:''),
         xhrFields: {withCredentials: true},
         data: streamCmdParms,
-        dataType: "json"
+        dataType: 'json'
       })
           .done(this.getStreamCmdResponse.bind(this))
           .fail(this.onFailure.bind(this));
@@ -707,14 +860,19 @@ function MonitorStream(monitorData) {
   }
   this.analyse_frames = true;
   this.show_analyse_frames = function(toggle) {
-    this.analyse_frames = toggle;
-    this.streamCmdParms.command = this.analyse_frames ? CMD_ANALYZE_ON : CMD_ANALYZE_OFF;
-    this.streamCmdReq(this.streamCmdParms);
+    const streamImage = this.getElement();
+    if (streamImage.nodeName == 'IMG') {
+      this.analyse_frames = toggle;
+      this.streamCmdParms.command = this.analyse_frames ? CMD_ANALYZE_ON : CMD_ANALYZE_OFF;
+      this.streamCmdReq(this.streamCmdParms);
+    } else {
+      console.log("Not streaming from zms, can't show analysis frames");
+    }
   };
 
   this.setMaxFPS = function(maxfps) {
     if (1) {
-      this.streamCommand({command: CMD_MAXFPS, maxfps: currentSpeed});
+      this.streamCommand({command: CMD_MAXFPS, maxfps: maxfps});
     } else {
       var streamImage = this.getElement();
       const oldsrc = streamImage.attr('src');
@@ -819,3 +977,110 @@ const waitUntil = (condition) => {
     }, 100);
   });
 };
+
+function startRTSP2WebPlay(videoEl, url) {
+  const webrtc = new RTCPeerConnection({
+    iceServers: [{
+      urls: ['stun:stun.l.google.com:19302']
+    }],
+    sdpSemantics: 'unified-plan'
+  });
+  webrtc.ontrack = function(event) {
+    console.log(event.streams.length + ' track is delivered');
+    videoEl.srcObject = event.streams[0];
+    videoEl.play();
+  };
+  webrtc.addTransceiver('video', {direction: 'sendrecv'});
+  webrtc.onnegotiationneeded = async function handleNegotiationNeeded() {
+    const offer = await webrtc.createOffer();
+
+    await webrtc.setLocalDescription(offer);
+
+    fetch(url, {
+      method: 'POST',
+      body: new URLSearchParams({data: btoa(webrtc.localDescription.sdp)})
+    })
+        .catch((rejected) => {
+          console.log(rejected);
+        })
+        .then((response) => response.text())
+        .then((data) => {
+          try {
+            webrtc.setRemoteDescription(
+                new RTCSessionDescription({type: 'answer', sdp: atob(data)})
+            );
+          } catch (e) {
+            console.warn(e);
+          }
+        });
+  };
+
+  const webrtcSendChannel = webrtc.createDataChannel('rtsptowebSendChannel');
+  webrtcSendChannel.onopen = (event) => {
+    console.log(`${webrtcSendChannel.label} has opened`);
+    webrtcSendChannel.send('ping');
+  };
+  webrtcSendChannel.onclose = (_event) => {
+    console.log(`${webrtcSendChannel.label} has closed`);
+    startRTSP2WebPlay(videoEl, url);
+  };
+  webrtcSendChannel.onmessage = (event) => console.log(event.data);
+}
+
+function startMsePlay(context, videoEl, url) {
+  const mse = new MediaSource();
+  mse.addEventListener('sourceopen', function() {
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    ws.onopen = function(event) {
+      console.log('Connect to ws');
+    };
+    ws.onmessage = function(event) {
+      const data = new Uint8Array(event.data);
+      if (data[0] === 9) {
+        let mimeCodec;
+        const decodedArr = data.slice(1);
+        if (window.TextDecoder) {
+          mimeCodec = new TextDecoder('utf-8').decode(decodedArr);
+        } else {
+          console.log("Browser too old. Doesn't support TextDecoder");
+        }
+        context.mseSourceBuffer = mse.addSourceBuffer('video/mp4; codecs="' + mimeCodec + '"');
+        context.mseSourceBuffer.mode = 'segments';
+        context.mseSourceBuffer.addEventListener('updateend', pushMsePacket, videoEl, context);
+      } else {
+        readMsePacket(event.data, videoEl, context);
+      }
+    };
+  }, false);
+  videoEl.src = window.URL.createObjectURL(mse);
+}
+
+function pushMsePacket(videoEl, context) {
+  if (context != undefined && !context.mseSourceBuffer.updating) {
+    if (context.mseQueue.length > 0) {
+      const packet = context.mseQueue.shift();
+      context.mseSourceBuffer.appendBuffer(packet);
+    } else {
+      context.mseStreamingStarted = false;
+    }
+  }
+  if (videoEl.buffered != undefined && videoEl.buffered.length > 0) {
+    if (typeof document.hidden !== 'undefined' && document.hidden) {
+    // no sound, browser paused video without sound in background
+      videoEl.currentTime = videoEl.buffered.end((videoEl.buffered.length - 1)) - 0.5;
+    }
+  }
+}
+
+function readMsePacket(packet, videoEl, context) {
+  if (!context.mseStreamingStarted) {
+    context.mseSourceBuffer.appendBuffer(packet);
+    context.mseStreamingStarted = true;
+    return;
+  }
+  context.mseQueue.push(packet);
+  if (!context.mseSourceBuffer.updating) {
+    pushMsePacket(videoEl, context);
+  }
+}

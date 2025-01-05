@@ -224,8 +224,8 @@ function dbFetchNext($result, $col=false) {
   return false;
 }
 
-function dbNumRows( $sql ) {
-  $result = dbQuery($sql);
+function dbNumRows($sql, $params=NULL) {
+  $result = dbQuery($sql, $params);
   return $result->rowCount();
 }
 
@@ -397,5 +397,37 @@ function db_supports_feature($feature) {
   } else {
     ZM\Warning("Unknown feature requested $feature");
   }
+}
+
+function dbInsert($table, $fieldArray) {
+  $query = 'INSERT INTO `' . $table . '` SET ';
+  $fields = [];
+  $conditions = [];
+  $values = [];
+  foreach ($fieldArray as $fieldName => $fieldValue) {
+    $fields[] = '`' . $fieldName.'`=?';
+    $values[] = $fieldValue;
+  }
+  $query .= implode(', ', $fields);
+  return dbQuery($query, $values);
+}
+
+function dbUpdate($table, $fieldArray, $conditionArray) {
+  $query = 'UPDATE `' . $table . '` SET ';
+  $fields = [];
+  $conditions = [];
+  $values = [];
+  foreach ($fieldArray as $fieldName => $fieldValue) {
+    $fields[] = '`' . $fieldName.'`=?';
+    $values[] = $fieldValue;
+  }
+  $query .= implode(', ', $fields);
+  $query .= ' WHERE ';
+  foreach ($conditionArray as $fieldName => $fieldValue) {
+    $conditions[] = '`' . $fieldName . '` = ?';
+    $values[] = $fieldValue;
+  }
+  $query .= implode(' AND ', $conditions);
+  return dbQuery($query, $values);
 }
 ?>

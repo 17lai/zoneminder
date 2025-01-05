@@ -19,10 +19,6 @@
 //
 
 // Monitor edit actions, monitor id derived, require edit permissions for that monitor
-if (!canEdit('Monitors')) {
-  ZM\Warning('Monitor actions require Monitors Permissions');
-  return;
-}
 
 require_once('includes/Monitor.php');
 require_once('includes/Zone.php');
@@ -42,6 +38,10 @@ if ($action == 'save') {
       if (!$x10Monitor) $x10Monitor = array();
     }
   } else {
+    if (!canCreate('Monitors')) {
+      ZM\Warning('Monitor actions require Monitors Create Permissions');
+      return;
+    }
     if ($user->unviewableMonitorIds()) {
       ZM\Warning('You are restricted to certain monitors so cannot add a new one.');
       return;
@@ -49,6 +49,10 @@ if ($action == 'save') {
     if (ZM_OPT_X10) {
       $x10Monitor = array();
     }
+   if (!empty($_REQUEST['newMonitor']['Id'])) { 
+     // Reuse existing but deleted monitor
+     $mid = validCardinal($_REQUEST['newMonitor']['Id']);
+   }
   }
 
   # For convenience
@@ -92,7 +96,9 @@ if ($action == 'save') {
       'TrackMotion' => 0,
       'ModectDuringPTZ' =>  0,
       'Enabled' => 0,
+      'Deleted' => 0,
       'DecodingEnabled' => 0,
+      'RTSP2WebEnabled' => 0,
       'JanusEnabled' => 0,
       'JanusAudioEnabled' => 0,
       'Janus_Use_RTSP_Restream' => 0,
@@ -100,13 +106,15 @@ if ($action == 'save') {
       'Exif' => 0,
       'RTSPDescribe' => 0,
       'V4LMultiBuffer'  => '',
+      'WallClockTimestamps' => '',
       'RecordAudio' => 0,
       'Method' => 'raw',
       'GroupIds'  =>  array(),
       'LinkedMonitors'  => array(),
       'MQTT_Enabled'  =>  0,
       'RTSPServer' => 0,
-      'SectionLengthWarn' => 0
+      'SectionLengthWarn' => 0,
+      'SOAP_wsa_compl' => 0 
       );
 
   # Checkboxes don't return an element in the POST data, so won't be present in newMonitor.
@@ -126,6 +134,10 @@ if ($action == 'save') {
       ZM\Debug('Auto selecting server to '.ZM_SERVER_ID);
     }
   }
+  if (!empty($newMonitor['ManufacturerId']) and empty($newMonitor['Manufacturer']))
+    unset($newMonitor['Manufacturer']);
+  if (!empty($newMonitor['ModelId']) and empty($newMonitor['Model']))
+    unset($newMonitor['Model']);
 
   $changes = $monitor->changes($newMonitor);
   ZM\Debug('Changes: '. print_r($changes, true));
@@ -134,6 +146,11 @@ if ($action == 'save') {
   if (count($changes)) {
     // monitor->Id() has a value when the db record exists
     if ($monitor->Id()) {
+      if ($monitor->Deleted() and ! isset($_REQUEST['newMonitor[Deleted]'])) {
+        # We are saving a new monitor with a specified Id and the Id is used in a deleted record.
+        # Undelete it so that it is visible.
+        $monitor->Deleted(false);
+      }
 
       # If we change anything that changes the shared mem size, zma can complain.  So let's stop first.
       if ($monitor->Type() != 'WebSite') {
@@ -320,7 +337,7 @@ if ($action == 'save') {
   } # end if ZM_OPT_X10
 
   if ( $restart ) {
-    if ( $monitor->Capturing() != 'None' and $monitor->Type() != 'WebSite' ) {
+    if ( $monitor->Capturing() != 'None' and $monitor->Type() != 'WebSite' and !$monitor->Deleted()) {
       $monitor->zmcControl('start');
 
       if ( $monitor->Controllable() ) {

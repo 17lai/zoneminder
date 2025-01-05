@@ -20,24 +20,7 @@
 
 error_reporting(E_ALL);
 
-$debug = false;
-if ( $debug ) {
-  // Use these for debugging, though not both at once!
-  phpinfo(INFO_VARIABLES);
-}
-
-// Useful debugging lines for mobile devices
-if ( false ) {
-  ob_start();
-  phpinfo(INFO_VARIABLES);
-  $fp = fopen('/tmp/env.html', 'w+');
-  fwrite($fp, ob_get_contents());
-  fclose($fp);
-  ob_end_clean();
-}
-
 require_once('includes/config.php');
-require_once('includes/session.php');
 require_once('includes/logger.php'); // already included in config
 
 // Useful debugging lines for mobile devices
@@ -64,9 +47,6 @@ define('ZM_BASE_PROTOCOL', $protocol);
 // Absolute URL's are unnecessary and break compatibility with reverse proxies 
 // define( "ZM_BASE_URL", $protocol.'://'.$_SERVER['HTTP_HOST'] );
 
-// Use relative URL's instead
-define('ZM_BASE_URL', '');
-
 require_once('includes/functions.php');
 if ( $_SERVER['REQUEST_METHOD'] == 'OPTIONS' ) {
   ZM\Debug('OPTIONS Method, only doing CORS');
@@ -75,7 +55,9 @@ if ( $_SERVER['REQUEST_METHOD'] == 'OPTIONS' ) {
   return;
 }
 
-if ( isset($_GET['skin']) ) {
+if ( defined('ZM_FORCE_SKIN_DEFAULT') ) {
+  $skin = ZM_FORCE_SKIN_DEFAULT;
+} else if ( isset($_GET['skin']) ) {
   $skin = $_GET['skin'];
 } else if ( isset($_COOKIE['zmSkin']) ) {
   $skin = $_COOKIE['zmSkin'];
@@ -87,14 +69,15 @@ if ( isset($_GET['skin']) ) {
 
 if (!is_dir('skins/'.$skin) ) {
   $skins = array_map('basename', glob('skins/*', GLOB_ONLYDIR));
-
-  if ( !in_array($skin, $skins) ) {
+  if (!in_array($skin, $skins)) {
     ZM\Error("Invalid skin '$skin' setting to ".$skins[0]);
     $skin = $skins[0];
   }
 }
 global $css;
-if ( isset($_GET['css']) ) {
+if (defined('ZM_FORCE_CSS_DEFAULT')) {
+  $css = ZM_FORCE_CSS_DEFAULT;
+} else if ( isset($_GET['css']) ) {
   $css = $_GET['css'];
 } else if ( isset($_COOKIE['zmCSS']) ) {
   $css = $_COOKIE['zmCSS'];
@@ -132,6 +115,7 @@ if (!file_exists(ZM_SKIN_PATH))
   ZM\Fatal("Invalid skin '$skin'");
 $skinBase[] = $skin;
 
+require_once('includes/session.php');
 zm_session_start();
 if (
   !isset($_SESSION['skin']) ||
@@ -206,7 +190,7 @@ if (
   ( $action != 'login' ) &&
   ( $view != 'view_video' ) && // only video no html
   ( $view != 'image' ) && // view=image doesn't return html, just image data.
-  ( $request != 'control' ) && 
+  (!$request or ($request == 'modal')) && // requests are ajax and can only return json.
   //( $view != 'frames' ) &&  // big html can overflow ob
   ( $view != 'archive' ) // returns data
   && ( (!isset($_SERVER['CONTENT_TYPE']) or ($_SERVER['CONTENT_TYPE'] != 'application/csp-report')) )
@@ -224,13 +208,16 @@ if ( ZM_OPT_USE_AUTH and (!isset($user)) and ($view != 'login') and ($view != 'n
     exit;
   }
   $view = 'none';
-  $redirect = ZM_BASE_URL.$_SERVER['PHP_SELF'].'?view=login';
+  $redirect = '?view=login';
   zm_session_start();
   $_SESSION['postLoginQuery'] = $_SERVER['QUERY_STRING'];
   session_write_close();
+  ZM\Debug("Redirecting to $redirect");
+  header('Location: '.$redirect);
+  return;
 } else if ( ZM_SHOW_PRIVACY && ($view != 'privacy') && ($view != 'options') && (!$request) && canEdit('System') ) {
   $view = 'none';
-  $redirect = ZM_BASE_URL.$_SERVER['PHP_SELF'].'?view=privacy';
+  $redirect = '?view=privacy';
   $request = null;
 }
 
@@ -242,6 +229,7 @@ if ( $action and $view and !$request ) {
     ZM\Debug("No includes/actions/$view.php for action $action");
   }
 }
+if ($error_message) ZM\Warning($error_message);
 
 if ( isset($_REQUEST['redirect']) ) {
   $redirect = '?view='.detaintPath($_REQUEST['redirect']);
@@ -262,14 +250,25 @@ if ( $request ) {
   return;
 }
 
+if (!$view) {
+  ZM\Debug(1, "Empty view, defaulting to home view");
+  $view = getHomeView();
+  header('Location: ?view='.$view);
+  return;
+}
+
 # Add CSP Headers
 $cspNonce = bin2hex(zm_random_bytes(16));
+
 if ( $includeFiles = getSkinIncludes('views/'.$view.'.php', true, true) ) {
   ob_start();
   CSPHeaders($view, $cspNonce);
   foreach ( $includeFiles as $includeFile ) {
-    if (!file_exists($includeFile))
-      ZM\Fatal("View '$view' does not exist");
+    if (!file_exists($includeFile)) {
+      ZM\Error("View '$view' does not exist, redirecting to console");
+      header('Location: ?view=console');
+      return;
+    }
     require_once $includeFile;
   }
   // If the view overrides $view to 'error', and the user is not logged in, then the
