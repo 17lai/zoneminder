@@ -24,6 +24,8 @@
 #include "zm_monitorstream.h"
 #include "zm_eventstream.h"
 #include "zm_fifo_stream.h"
+#include <iomanip>
+#include <sstream>
 #include <string>
 #include <unistd.h>
 
@@ -34,20 +36,29 @@ bool ValidateAccess(User *user, int mon_id) {
     if (user->getStream() < User::PERM_VIEW) {
       allowed = false;
       Warning("Insufficient privileges for request user %d %s for monitor %d, user does not have permission to stream live view.",
-          user->Id(), user->getUsername(), mon_id);
+              user->Id(), user->getUsername(), mon_id);
     } else if (!user->canAccess(mon_id)) {
       allowed = false;
       Warning("Insufficient privileges for request user %d %s for monitor %d, user does not have permission view this monitor.",
-          user->Id(), user->getUsername(), mon_id);
+              user->Id(), user->getUsername(), mon_id);
     }
   } else if (user->getEvents() < User::PERM_VIEW) {
     allowed = false;
     Warning("Insufficient privileges for request user %d %s, user does not have permission view events.",
-        user->Id(), user->getUsername());
+            user->Id(), user->getUsername());
   }
   return allowed;
 }
 
+int exit_zms(int exit_code) {
+  Debug(1, "Terminating");
+  Image::Deinitialise();
+  dbQueue.stop();
+  zmDbClose();
+  logTerm();
+  exit(exit_code);
+  return exit_code;
+}
 int main(int argc, const char *argv[], char **envp) {
   self = argv[0];
 
@@ -60,6 +71,7 @@ int main(int argc, const char *argv[], char **envp) {
   time_t event_time = 0;
   uint64_t event_id = 0;
   unsigned int frame_id = 1;
+  int frames_to_send = -1;
   unsigned int scale = 100;
   unsigned int rate = 100;
   double maxfps = 10.0;
@@ -100,7 +112,7 @@ int main(int argc, const char *argv[], char **envp) {
   const char *query = getenv("QUERY_STRING");
   if ( query == nullptr ) {
     Fatal("No query string.");
-    return 0;
+    return exit_zms(0);
   }  // end if query
 
   Debug(1, "Query: %s", query);
@@ -144,6 +156,12 @@ int main(int argc, const char *argv[], char **envp) {
       monitor_id = atoi(value);
       if ( source == ZMS_UNKNOWN )
         source = ZMS_MONITOR;
+    } else if ( !strcmp(name, "datetime") ) {
+      std::tm tm = {};
+      std::stringstream ss(value);
+      ss >> std::get_time(&tm, "%Y-%m-%d %H:%M:%S");
+      auto tp = std::chrono::system_clock::from_time_t(std::mktime(&tm));
+      event_time = std::chrono::duration_cast<FPSeconds>(tp.time_since_epoch()).count();
     } else if ( !strcmp(name, "time") ) {
       event_time = atoi(value);
     } else if ( !strcmp(name, "event") ) {
@@ -152,8 +170,14 @@ int main(int argc, const char *argv[], char **envp) {
     } else if ( !strcmp(name, "frame") ) {
       frame_id = strtoull(value, nullptr, 10);
       source = ZMS_EVENT;
+    } else if ( !strcmp(name, "frames") ) {
+      frames_to_send = strtoll(value, nullptr, 10);
     } else if ( !strcmp(name, "scale") ) {
       scale = atoi(value);
+      if (scale > 1600) {
+        Warning("Limiting scale to 16x");
+        scale = 1600;
+      }
     } else if ( !strcmp(name, "rate") ) {
       rate = atoi(value);
     } else if ( !strcmp(name, "maxfps") ) {
@@ -219,7 +243,7 @@ int main(int argc, const char *argv[], char **envp) {
       }
     } else {
       if ( *auth ) {
-        user = zmLoadAuthUser(auth, config.auth_hash_ips);
+        user = zmLoadAuthUser(auth, username, config.auth_hash_ips);
       } else if ( username.length() && password.length() ) {
         user = zmLoadUser(username.c_str(), password.c_str());
       }
@@ -229,17 +253,13 @@ int main(int argc, const char *argv[], char **envp) {
 
       const char *referer = getenv("HTTP_REFERER");
       Error("Unable to authenticate user from %s", referer);
-      logTerm();
-      zmDbClose();
-      return 0;
+      return exit_zms(0);
     }
     if ( !ValidateAccess(user, monitor_id) ) {
       delete user;
       user = nullptr;
       fputs("HTTP/1.0 403 Forbidden\r\n\r\n", stdout);
-      logTerm();
-      zmDbClose();
-      return 0;
+      return exit_zms(0);
     }
     delete user;
     user = nullptr;
@@ -260,16 +280,16 @@ int main(int argc, const char *argv[], char **envp) {
   char date_string[64];
   tm now_tm = {};
   strftime(date_string, sizeof(date_string)-1,
-      "%a, %d %b %Y %H:%M:%S GMT", gmtime_r(&now, &now_tm));
+           "%a, %d %b %Y %H:%M:%S GMT", gmtime_r(&now, &now_tm));
 
   fputs("Last-Modified: ", stdout);
   fputs(date_string, stdout);
   fputs(
-      "\r\nExpires: Mon, 26 Jul 1997 05:00:00 GMT\r\n"
-      "Cache-Control: no-store, no-cache, must-revalidate\r\n"
-      "Cache-Control: post-check=0, pre-check=0\r\n"
-      "Pragma: no-cache\r\n",
-      stdout);
+    "\r\nExpires: Mon, 26 Jul 1997 05:00:00 GMT\r\n"
+    "Cache-Control: no-store, no-cache, must-revalidate\r\n"
+    "Cache-Control: post-check=0, pre-check=0\r\n"
+    "Pragma: no-cache\r\n",
+    stdout);
 
   if ( source == ZMS_MONITOR ) {
     MonitorStream stream;
@@ -279,6 +299,7 @@ int main(int argc, const char *argv[], char **envp) {
     stream.setStreamTTL(ttl);
     stream.setStreamQueue(connkey);
     stream.setStreamBuffer(playback_buffer);
+    stream.setFramesToSend(frames_to_send);
     stream.setStreamStart(monitor_id);
     stream.setStreamFrameType(analysis_frames ? StreamBase::FRAME_ANALYSIS: StreamBase::FRAME_NORMAL);
 
@@ -311,6 +332,7 @@ int main(int argc, const char *argv[], char **envp) {
     stream.setStreamMaxFPS(maxfps);
     stream.setStreamMode(replay);
     stream.setStreamQueue(connkey);
+    stream.setFramesToSend(frames_to_send);
     if ( monitor_id && event_time ) {
       stream.setStreamStart(monitor_id, event_time);
     } else {
@@ -320,6 +342,8 @@ int main(int argc, const char *argv[], char **envp) {
     stream.setStreamFrameType(analysis_frames ? StreamBase::FRAME_ANALYSIS: StreamBase::FRAME_NORMAL);
     if ( mode == ZMS_JPEG ) {
       stream.setStreamType(EventStream::STREAM_JPEG);
+    } else if ( mode == ZMS_SINGLE ) {
+      stream.setStreamType(MonitorStream::STREAM_SINGLE);
     } else {
       stream.setStreamFormat(format);
       stream.setStreamBitrate(bitrate);
@@ -330,11 +354,6 @@ int main(int argc, const char *argv[], char **envp) {
     Error("Neither a monitor or event was specified.");
   }  // end if monitor or event
 
-  Debug(1, "Terminating");
-  Image::Deinitialise();
-  dbQueue.stop();
-  logTerm();
-  zmDbClose();
-
-  return 0;
+  return exit_zms(0);
 }
+
